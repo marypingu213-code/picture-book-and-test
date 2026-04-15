@@ -1,335 +1,278 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { Upload, FileText, Copy, Trash2, Loader2, Image as ImageIcon, CheckCircle2, AlertCircle, Play, BookOpen, BrainCircuit, Check, Key } from 'lucide-react';
-
-/**
- * 【GitHub 部署說明】
- * 1. 在本地開發（如 Vite）時，建議將下方 API_KEY 改為：
- * const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
- * 2. 為了相容於各種編譯環境，這裡預設為空字串。
- * 執行環境會自動處理金鑰，或您可以手動填入測試。
- */
-const API_KEY = ""; 
-
-export default function App() {
-  const [images, setImages] = useState([]);
-  const [isProcessingAll, setIsProcessingAll] = useState(false);
-  const [learningContent, setLearningContent] = useState(null);
-  const [isGeneratingLearning, setIsGeneratingLearning] = useState(false);
-  
-  // 檢查 API 金鑰狀態 (在某些環境下由系統注入)
-  const [apiKeyError, setApiKeyError] = useState(false);
-
-  // 指數退避重試邏輯
-  const fetchWithRetry = async (payload, retries = 5) => {
-    // 如果 API_KEY 為空，在某些環境下仍可運作，若失敗則提示
-    for (let i = 0; i <= retries; i++) {
-      try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          }
-        );
-        
-        if (!response.ok) {
-          const errorData = await response.json();
-          // 如果是金鑰錯誤，設定錯誤狀態
-          if (response.status === 403 || response.status === 401) setApiKeyError(true);
-          throw new Error(errorData.error?.message || `HTTP error! status: ${response.status}`);
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>繪本文字擷取與教學產生器</title>
+    <!-- React & Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; }
+        .scanning-animation { animation: scan 2s ease-in-out infinite; }
+        @keyframes scan {
+            0%, 100% { transform: translateY(-10%); opacity: 0.5; }
+            50% { transform: translateY(110%); opacity: 1; }
         }
-        return await response.json();
-      } catch (err) {
-        if (i === retries) throw err;
-        const delay = Math.pow(2, i) * 1000;
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
-  };
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+    <div id="root"></div>
 
-  const processImage = async (index) => {
-    const target = images[index];
-    if (target.status === 'processing') return;
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
 
-    setImages(prev => prev.map((img, i) => i === index ? { ...img, status: 'processing', error: null } : img));
+        // --- SVG Icons (取代 Lucide) ---
+        const IconUpload = () => <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>;
+        const IconPlay = () => <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>;
+        const IconCopy = () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>;
+        const IconTrash = () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>;
+        const IconBrain = () => <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.989-2.386l-.548-.547z" /></svg>;
 
-    try {
-      const base64Data = target.preview.split(',')[1];
-      const payload = {
-        contents: [{
-          role: "user",
-          parts: [
-            { text: "請擷取圖片中的文字。規則：1. 忽略國字旁邊用來標註讀音的注音符號。2. 如果注音符號是單獨出現，且是用來表示狀聲詞（例如：呼呼、磅、咚），請務必保留該注音。3. 保持原始分行。直接輸出文字內容即可。" },
-            { inlineData: { mimeType: target.file.type, data: base64Data } }
-          ]
-        }]
-      };
+        function App() {
+            const [images, setImages] = useState([]);
+            const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || "");
+            const [isProcessingAll, setIsProcessingAll] = useState(false);
+            const [learningContent, setLearningContent] = useState(null);
+            const [isGeneratingLearning, setIsGeneratingLearning] = useState(false);
 
-      const result = await fetchWithRetry(payload);
-      const extractedText = result.candidates?.[0]?.content?.parts?.[0]?.text || "無法辨識文字";
+            useEffect(() => {
+                localStorage.setItem('gemini_api_key', apiKey);
+            }, [apiKey]);
 
-      setImages(prev => prev.map((img, i) => i === index ? { 
-        ...img, 
-        status: 'completed', 
-        result: extractedText.trim() 
-      } : img));
-    } catch (error) {
-      setImages(prev => prev.map((img, i) => i === index ? { 
-        ...img, 
-        status: 'error', 
-        error: error.message || "處理失敗" 
-      } : img));
-    }
-  };
+            const fetchWithRetry = async (payload, retries = 5) => {
+                if (!apiKey) throw new Error("請先填寫 Gemini API 金鑰");
+                for (let i = 0; i <= retries; i++) {
+                    try {
+                        const response = await fetch(
+                            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+                            {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload)
+                            }
+                        );
+                        if (!response.ok) {
+                            const errorData = await response.json();
+                            throw new Error(errorData.error?.message || `HTTP ${response.status}`);
+                        }
+                        return await response.json();
+                    } catch (err) {
+                        if (i === retries) throw err;
+                        await new Promise(r => setTimeout(r, Math.pow(2, i) * 1000));
+                    }
+                }
+            };
 
-  const generateLearningMaterials = async () => {
-    const fullContent = images.map(img => img.result).filter(Boolean).join('\n\n');
-    if (!fullContent) return;
+            const processImage = async (index) => {
+                const target = images[index];
+                if (target.status === 'processing') return;
 
-    setIsGeneratingLearning(true);
-    try {
-      const payload = {
-        contents: [{
-          role: "user",
-          parts: [{ text: `根據以下繪本內容，請提供：
-            1. 約 100 字的繪本大意。
-            2. 5 題適合學童的閱讀理解選擇題。
-            每題提供 2 到 4 個選項，並標註正確答案。
-            請以 JSON 格式回應，格式如下：
-            {
-              "summary": "大意內容",
-              "quiz": [
-                {"question": "題目", "options": ["選項1", "選項2"], "answer": "正確選項文字"}
-              ]
-            }
-            
-            繪本內容：
-            ${fullContent}` }]
-        }],
-        generationConfig: { responseMimeType: "application/json" }
-      };
+                setImages(prev => prev.map((img, i) => i === index ? { ...img, status: 'processing', error: null } : img));
 
-      const result = await fetchWithRetry(payload);
-      const data = JSON.parse(result.candidates[0].content.parts[0].text);
-      setLearningContent(data);
-    } catch (error) {
-      console.error("生成教材失敗", error);
-    } finally {
-      setIsGeneratingLearning(false);
-    }
-  };
+                try {
+                    const base64Data = target.preview.split(',')[1];
+                    const payload = {
+                        contents: [{
+                            role: "user",
+                            parts: [
+                                { text: "請擷取圖片中的文字。規則：1. 忽略國字旁邊用來標註讀音的注音符號。2. 如果注音符號是單獨出現，且是用來表示狀聲詞（例如：呼呼、磅、咚），請務必保留該注音。3. 保持原始分行。直接輸出文字內容即可。" },
+                                { inlineData: { mimeType: target.file.type, data: base64Data } }
+                            ]
+                        }]
+                    };
 
-  const handleFileUpload = (e) => {
-    const files = Array.from(e.target.files);
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setImages(prev => [...prev, {
-          file,
-          preview: reader.result,
-          status: 'idle',
-          result: '',
-          error: null,
-          id: crypto.randomUUID()
-        }]);
-      };
-      reader.readAsDataURL(file);
-    });
-  };
+                    const result = await fetchWithRetry(payload);
+                    const extractedText = result.candidates?.[0]?.content?.parts?.[0]?.text || "無法辨識文字";
 
-  const processAll = async () => {
-    setIsProcessingAll(true);
-    for (let i = 0; i < images.length; i++) {
-      if (images[i].status !== 'completed') {
-        await processImage(i);
-      }
-    }
-    setIsProcessingAll(false);
-  };
+                    setImages(prev => prev.map((img, i) => i === index ? { 
+                        ...img, status: 'completed', result: extractedText.trim() 
+                    } : img));
+                } catch (error) {
+                    setImages(prev => prev.map((img, i) => i === index ? { 
+                        ...img, status: 'error', error: error.message 
+                    } : img));
+                }
+            };
 
-  const copyToClipboard = (text) => {
-    const textArea = document.createElement("textarea");
-    textArea.value = text;
-    document.body.appendChild(textArea);
-    textArea.select();
-    document.execCommand('copy');
-    document.body.removeChild(textArea);
-  };
+            const handleFileUpload = (e) => {
+                const files = Array.from(e.target.files);
+                files.forEach(file => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        setImages(prev => [...prev, {
+                            file, preview: reader.result, status: 'idle', result: '', error: null, id: crypto.randomUUID()
+                        }]);
+                    };
+                    reader.readAsDataURL(file);
+                });
+            };
 
-  const copyAllText = () => {
-    const allText = images.map(img => img.result).filter(Boolean).join('\n\n');
-    copyToClipboard(allText);
-  };
+            const generateLearningMaterials = async () => {
+                const fullContent = images.map(img => img.result).filter(Boolean).join('\n\n');
+                if (!fullContent) return;
+                setIsGeneratingLearning(true);
+                try {
+                    const payload = {
+                        contents: [{
+                            role: "user",
+                            parts: [{ text: `根據以下內容產生教學材料：1.約100字大意。2.5題選擇題（每題2-4選項，附答案）。請回傳 JSON 格式：{"summary":"", "quiz":[{"question":"", "options":[], "answer":""}]}\n\n內容：\n${fullContent}` }]
+                        }],
+                        generationConfig: { responseMimeType: "application/json" }
+                    };
+                    const result = await fetchWithRetry(payload);
+                    setLearningContent(JSON.parse(result.candidates[0].content.parts[0].text));
+                } catch (error) {
+                    alert("生成教材失敗：" + error.message);
+                } finally {
+                    setIsGeneratingLearning(false);
+                }
+            };
 
-  const clearAll = () => {
-    setImages([]);
-    setLearningContent(null);
-  };
+            const copyToClipboard = (text) => {
+                const el = document.createElement('textarea');
+                el.value = text;
+                document.body.appendChild(el);
+                el.select();
+                document.execCommand('copy');
+                document.body.removeChild(el);
+                alert("已複製到剪貼簿！");
+            };
 
-  const completedCount = images.filter(img => img.status === 'completed').length;
+            const processAll = async () => {
+                setIsProcessingAll(true);
+                for (let i = 0; i < images.length; i++) {
+                    if (images[i].status !== 'completed') await processImage(i);
+                }
+                setIsProcessingAll(false);
+            };
 
-  return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-900 pb-20">
-      <div className="max-w-4xl mx-auto">
-        
-        {/* API Key Warning - 僅在明確失敗時顯示 */}
-        {apiKeyError && (
-          <div className="mb-6 bg-amber-50 border-l-4 border-amber-400 p-4 rounded-r-lg shadow-sm">
-            <div className="flex items-center gap-3">
-              <Key className="text-amber-500" />
-              <div>
-                <p className="font-bold text-amber-800">API 金鑰授權失敗</p>
-                <p className="text-sm text-amber-700">請確保您的環境已設定正確的金鑰。部署至 GitHub 時，請於 <code className="bg-amber-100 px-1 rounded">.env</code> 設定 <code className="bg-amber-100 px-1 rounded">VITE_GEMINI_API_KEY</code>。</p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Header */}
-        <header className="mb-8 text-center">
-          <h1 className="text-3xl font-bold text-slate-800 flex items-center justify-center gap-2">
-            <BookOpen className="text-blue-600" />
-            繪本文字擷取與教學產生器
-          </h1>
-          <p className="text-slate-500 mt-2">自動過濾注音、保留狀聲詞，並生成課後學習教材</p>
-        </header>
-
-        {/* Upload & Controls */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-8">
-          <div className="flex flex-col items-center justify-center border-2 border-dashed border-slate-300 rounded-xl p-8 bg-slate-50 hover:bg-slate-100 transition-colors cursor-pointer relative">
-            <input type="file" multiple accept="image/*" onChange={handleFileUpload} className="absolute inset-0 opacity-0 cursor-pointer" />
-            <Upload className="w-10 h-10 text-slate-400 mb-3" />
-            <p className="text-slate-600 font-medium">點擊或拖放繪本圖片至此</p>
-          </div>
-
-          {images.length > 0 && (
-            <div className="mt-6 flex flex-wrap gap-3 justify-center border-t pt-6">
-              <button onClick={processAll} disabled={isProcessingAll || completedCount === images.length} className="flex items-center gap-2 px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-all font-medium">
-                {isProcessingAll ? <Loader2 className="animate-spin w-4 h-4" /> : <Play className="w-4 h-4" />}
-                開始掃描全部
-              </button>
-              <button onClick={copyAllText} disabled={completedCount === 0} className="flex items-center gap-2 px-5 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-all font-medium">
-                <Copy className="w-4 h-4" /> 複製全部文字
-              </button>
-              <button onClick={generateLearningMaterials} disabled={completedCount === 0 || isGeneratingLearning} className="flex items-center gap-2 px-5 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-all font-medium">
-                {isGeneratingLearning ? <Loader2 className="animate-spin w-4 h-4" /> : <BrainCircuit className="w-4 h-4" />}
-                生成大意與題目
-              </button>
-              <button onClick={clearAll} className="flex items-center gap-2 px-5 py-2 bg-white text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50 transition-all font-medium">
-                <Trash2 className="w-4 h-4" /> 清空
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Learning Materials Section */}
-        {learningContent && (
-          <div className="mb-10 bg-purple-50 rounded-2xl border border-purple-100 p-8 shadow-sm">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-bold text-purple-900 flex items-center gap-2">
-                <BrainCircuit className="text-purple-600" /> 教學強化內容
-              </h2>
-              <button 
-                onClick={() => {
-                  const content = `繪本大意：\n${learningContent.summary}\n\n閱讀理解測驗：\n` + 
-                    learningContent.quiz.map((q, i) => `${i+1}. ${q.question}\n選項：${q.options.join(', ')}\n答案：${q.answer}`).join('\n\n');
-                  copyToClipboard(content);
-                }}
-                className="text-sm bg-white border border-purple-200 text-purple-600 px-3 py-1 rounded-md hover:bg-purple-100 transition-colors"
-              >
-                複製教材全文
-              </button>
-            </div>
-            
-            <section className="mb-8">
-              <h3 className="text-lg font-bold text-purple-800 mb-3 underline decoration-purple-200 underline-offset-4">📖 繪本大意</h3>
-              <div className="bg-white p-5 rounded-xl text-slate-700 leading-relaxed shadow-sm italic border border-purple-100">
-                {learningContent.summary}
-              </div>
-            </section>
-
-            <section>
-              <h3 className="text-lg font-bold text-purple-800 mb-4 underline decoration-purple-200 underline-offset-4">💡 閱讀理解小測驗</h3>
-              <div className="space-y-4">
-                {learningContent.quiz.map((q, i) => (
-                  <div key={i} className="bg-white p-5 rounded-xl shadow-sm border border-purple-100">
-                    <p className="font-bold text-slate-800 mb-3">{i + 1}. {q.question}</p>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {q.options.map((opt, oi) => (
-                        <div key={oi} className={`px-4 py-2 rounded-lg border text-sm flex items-center justify-between ${opt === q.answer ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-medium' : 'bg-slate-50 border-slate-100 text-slate-600'}`}>
-                          {opt}
-                          {opt === q.answer && <Check size={14} />}
+            return (
+                <div className="max-w-4xl mx-auto p-4 md:p-8">
+                    {/* API Settings */}
+                    <div className="mb-6 flex flex-col md:flex-row items-center gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                        <div className="flex items-center gap-2 text-slate-500 shrink-0">
+                            <span className="text-sm font-bold">Gemini API Key:</span>
                         </div>
-                      ))}
+                        <input 
+                            type="password" 
+                            className="w-full bg-slate-50 border border-slate-200 px-4 py-2 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
+                            placeholder="在此貼上您的金鑰..."
+                            value={apiKey}
+                            onChange={(e) => setApiKey(e.target.value)}
+                        />
+                        <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-xs text-blue-500 hover:underline shrink-0">點此取得金鑰</a>
                     </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
-        )}
 
-        {/* Results List */}
-        <div className="space-y-6">
-          {images.map((img, index) => (
-            <div key={img.id} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col md:flex-row min-h-[220px]">
-              <div className="w-full md:w-1/3 bg-slate-100 relative group aspect-video md:aspect-auto">
-                <img src={img.preview} className="w-full h-full object-contain" />
-                {img.status === 'processing' && (
-                  <div className="absolute inset-0 bg-white/70 backdrop-blur-sm flex flex-col items-center justify-center">
-                    <Loader2 className="w-8 h-8 text-blue-600 animate-spin mb-2" />
-                    <span className="text-xs font-bold text-blue-700 uppercase tracking-widest">Scanning...</span>
-                  </div>
-                )}
-                <button 
-                  onClick={() => setImages(prev => prev.filter(i => i.id !== img.id))}
-                  className="absolute top-2 left-2 p-1.5 bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  <Trash2 size={12} />
-                </button>
-              </div>
+                    <header className="text-center mb-10">
+                        <h1 className="text-3xl font-bold text-slate-800 flex items-center justify-center gap-2">
+                            📚 繪本教學產生器
+                        </h1>
+                        <p className="text-slate-500 mt-2">智慧過濾注音，保留狀聲詞，自動產出教材</p>
+                    </header>
 
-              <div className="flex-1 p-6 flex flex-col">
-                <div className="flex items-center justify-between mb-4">
-                  <span className="text-xs font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded">第 {index + 1} 頁</span>
-                  {img.status === 'completed' && <CheckCircle2 className="text-emerald-500 w-5 h-5" />}
-                  {img.status === 'error' && <AlertCircle className="text-red-500 w-5 h-5" />}
-                </div>
-
-                <div className="flex-1">
-                  {img.status === 'idle' && (
-                    <button onClick={() => processImage(index)} className="w-full h-full flex flex-col items-center justify-center border border-dashed border-slate-200 rounded-xl hover:bg-blue-50 hover:border-blue-200 transition-colors group">
-                      <Play className="text-slate-300 group-hover:text-blue-500 mb-2" />
-                      <span className="text-sm text-slate-400 group-hover:text-blue-600">按此開始辨識</span>
-                    </button>
-                  )}
-                  {(img.status === 'completed' || img.status === 'error') && (
-                    <div className="relative group h-full">
-                      <textarea 
-                        className={`w-full h-full min-h-[120px] bg-slate-50 border-none focus:ring-0 text-slate-700 font-sans leading-relaxed resize-none p-2 rounded-lg ${img.status === 'error' ? 'text-red-400' : ''}`}
-                        value={img.status === 'error' ? img.error : img.result}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setImages(prev => prev.map((item, i) => i === index ? {...item, result: val, status: 'completed'} : item));
-                        }}
-                      />
-                      {img.status === 'completed' && (
-                        <button 
-                          onClick={() => copyToClipboard(img.result)}
-                          className="absolute top-2 right-2 p-1.5 bg-white border border-slate-200 text-slate-400 rounded-md hover:text-blue-600 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <Copy size={14} />
-                        </button>
-                      )}
+                    {/* Upload */}
+                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 mb-8 text-center relative group">
+                        <input type="file" multiple accept="image/*" onChange={handleFileUpload} className="absolute inset-0 opacity-0 cursor-pointer" />
+                        <div className="flex flex-col items-center text-slate-400 group-hover:text-blue-500 transition-colors">
+                            <IconUpload />
+                            <p className="mt-4 font-medium">點擊或拖放圖片至此開始</p>
+                        </div>
                     </div>
-                  )}
+
+                    {images.length > 0 && (
+                        <div className="flex flex-wrap justify-center gap-3 mb-10">
+                            <button onClick={processAll} disabled={isProcessingAll || !apiKey} className="flex items-center gap-2 px-6 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 transition-all shadow-md font-bold">
+                                {isProcessingAll ? <span className="animate-spin">🌀</span> : <IconPlay />} 開始全部掃描
+                            </button>
+                            <button onClick={() => copyToClipboard(images.map(i=>i.result).join('\n\n'))} className="flex items-center gap-2 px-6 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 shadow-md font-bold">
+                                <IconCopy /> 複製全文
+                            </button>
+                            <button onClick={generateLearningMaterials} className="flex items-center gap-2 px-6 py-2 bg-purple-600 text-white rounded-xl hover:bg-purple-700 shadow-md font-bold">
+                                {isGeneratingLearning ? "生成中..." : <IconBrain />} 生成教學包
+                            </button>
+                            <button onClick={() => setImages([])} className="px-6 py-2 bg-white text-slate-500 border border-slate-200 rounded-xl hover:bg-slate-50">清空</button>
+                        </div>
+                    )}
+
+                    {/* Learning Section */}
+                    {learningContent && (
+                        <div className="bg-purple-50 rounded-2xl border border-purple-100 p-8 mb-10 shadow-sm animate-in fade-in slide-in-from-top-4">
+                            <h2 className="text-2xl font-bold text-purple-900 mb-6 flex items-center gap-2">✨ 教學資源區</h2>
+                            <div className="space-y-8">
+                                <div className="bg-white p-6 rounded-xl border border-purple-200 shadow-sm">
+                                    <h3 className="text-lg font-bold text-purple-800 mb-3 underline underline-offset-8 decoration-purple-100">📖 繪本大意</h3>
+                                    <p className="text-slate-700 leading-relaxed italic">{learningContent.summary}</p>
+                                </div>
+                                <div className="space-y-4">
+                                    <h3 className="text-lg font-bold text-purple-800 underline underline-offset-8 decoration-purple-100">💡 閱讀理解小測驗</h3>
+                                    {learningContent.quiz.map((q, idx) => (
+                                        <div key={idx} className="bg-white p-5 rounded-xl border border-purple-100">
+                                            <p className="font-bold text-slate-800 mb-3">{idx+1}. {q.question}</p>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                                {q.options.map((opt, oi) => (
+                                                    <div key={oi} className={`px-4 py-2 rounded-lg border text-sm ${opt === q.answer ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-bold' : 'bg-slate-50 border-slate-100 text-slate-500'}`}>
+                                                        {opt} {opt === q.answer && '✓'}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Images List */}
+                    <div className="space-y-6">
+                        {images.map((img, index) => (
+                            <div key={img.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col md:flex-row">
+                                <div className="md:w-1/3 bg-slate-100 relative h-48 md:h-auto">
+                                    <img src={img.preview} className="w-full h-full object-contain" />
+                                    {img.status === 'processing' && (
+                                        <div className="absolute inset-0 bg-blue-500/20 backdrop-blur-sm flex items-center justify-center">
+                                            <div className="w-full h-1 bg-blue-600 scanning-animation absolute top-0"></div>
+                                            <span className="text-blue-700 font-bold bg-white/80 px-4 py-2 rounded-full text-xs shadow-lg">正在掃描圖片文字...</span>
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="flex-1 p-6 flex flex-col">
+                                    <div className="flex justify-between items-center mb-4">
+                                        <span className="px-3 py-1 bg-slate-100 rounded-full text-xs font-bold text-slate-400">PAGE {index + 1}</span>
+                                        <div className="flex gap-2">
+                                            {img.status === 'completed' && <span className="text-emerald-500 text-xs font-bold">✓ 辨識完成</span>}
+                                            {img.status === 'error' && <span className="text-red-500 text-xs font-bold">⚠ 失敗</span>}
+                                        </div>
+                                    </div>
+                                    <textarea 
+                                        className="flex-1 min-h-[150px] w-full bg-slate-50 border-none focus:ring-0 text-slate-700 font-medium leading-relaxed p-4 rounded-xl resize-none"
+                                        value={img.status === 'error' ? img.error : img.result}
+                                        placeholder={img.status === 'idle' ? "等待掃描..." : "擷取結果將顯示於此..."}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            setImages(prev => prev.map(item => item.id === img.id ? {...item, result: val, status: 'completed'} : item));
+                                        }}
+                                    />
+                                    {img.status === 'completed' && (
+                                        <div className="mt-4 flex justify-end gap-2">
+                                            <button onClick={() => copyToClipboard(img.result)} className="p-2 text-slate-400 hover:text-blue-600 transition-colors"><IconCopy /></button>
+                                            <button onClick={() => setImages(p => p.filter(i=>i.id !== img.id))} className="p-2 text-slate-400 hover:text-red-500 transition-colors"><IconTrash /></button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
                 </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
